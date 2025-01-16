@@ -10,7 +10,7 @@ namespace Leaf;
  * The easiest way to build simple but powerful apps and APIs quickly.
  *
  * @author Michael Darko <mickdd22@gmail.com>
- * @copyright 2019-2022 Michael Darko
+ * @copyright 2019-2024 Michael Darko
  * @link https://leafphp.dev
  * @license MIT
  * @package Leaf
@@ -18,15 +18,9 @@ namespace Leaf;
 class App extends Router
 {
     /**
-     * Leaf container instance
-     * @var \Leaf\Helpers\Container
-     */
-    protected $container;
-
-    /**
      * Callable to be invoked on application error
      */
-    protected $errorHandler;
+    protected Exception\Run $errorHandler;
 
     /********************************************************************************
      * Instantiation and Configuration
@@ -39,78 +33,53 @@ class App extends Router
     public function __construct(array $userSettings = [])
     {
         $this->setupErrorHandler();
+        $this->loadConfig($userSettings);
 
-        if (count($userSettings) > 0) {
-            Config::set($userSettings);
-        }
+        $scripts = Config::getStatic('scripts');
 
-        if (class_exists('\Leaf\Anchor\CSRF')) {
-            if (!Anchor\CSRF::token()) {
-                Anchor\CSRF::init();
+        if (!empty($scripts)) {
+            foreach ($scripts as $script) {
+                \call_user_func($script, $this);
             }
 
-            if (!Anchor\CSRF::verify()) {
-                $csrfError = Anchor\CSRF::errors()['token'];
-                Http\Response::status(400);
-                echo Exception\General::csrf($csrfError);
-                exit();
-            }
+            $this->loadConfig();
         }
+    }
 
-        $this->container = new \Leaf\Helpers\Container();
+    protected function loadConfig(array $userSettings = [])
+    {
+        if (!empty($userSettings)) {
+            Config::set(array_merge($userSettings, [
+                'mode' => _env('APP_ENV', Config::getStatic('mode')),
+            ]));
+        }
 
         $this->setupDefaultContainer();
-
-        if (class_exists('\Leaf\BareUI')) {
-            View::attach(\Leaf\BareUI::class, 'template');
-        }
-
-        $this->loadViewEngines();
     }
 
     protected function setupErrorHandler()
     {
-        if ($this->config('debug') === true) {
-            $debugConfig = [E_ALL, 1];
-            $this->errorHandler = (new \Leaf\Exception\Run());
-            $this->errorHandler->register();
-        } else {
-            $debugConfig = [0, 0];
-            $this->setErrorHandler(['\Leaf\Exception\General', 'defaultError'], true);
-        }
-
-        error_reporting($debugConfig[0]);
-        ini_set('display_errors', (string) $debugConfig[1]);
+        $this->errorHandler = (new Exception\Run());
+        $this->errorHandler->register();
     }
 
     /**
      * Set a custom error screen.
-     *
-     * @param callable|array $handler The function to be executed
+     * @param $handler The function to be executed
      */
-    public function setErrorHandler($handler, bool $wrapper = true)
+    public function setErrorHandler($handler)
     {
-        $errorHandler = $handler;
+        if (Anchor::toBool(Config::getStatic('debug')) === false) {
+            if ($this->errorHandler instanceof Exception\Run) {
+                $this->errorHandler->unregister();
+            }
 
-        if ($this->errorHandler instanceof \Leaf\Exception\Run) {
-            $this->errorHandler->unregister();
+            $this->errorHandler = new Exception\Run();
+            $this
+                ->errorHandler
+                ->pushHandler($handler)
+                ->register();
         }
-
-        if ($handler instanceof \Leaf\Exception\Handler\Handler) {
-            $this->errorHandler = new \Leaf\Exception\Run();
-            $this->errorHandler->pushHandler($handler)->register();
-        }
-
-        if ($wrapper) {
-            $errorHandler = function ($errno, $errstr = '', $errfile = '', $errline = '') use ($handler) {
-                $exception = Exception\General::toException($errno, $errstr, $errfile, $errline);
-                Http\Response::status(500);
-                call_user_func_array($handler, [$exception]);
-                exit();
-            };
-        }
-
-        set_error_handler($errorHandler);
     }
 
     /**
@@ -119,110 +88,53 @@ class App extends Router
      */
     public function register($name, $value)
     {
-        $this->container->singleton($name, $value);
-    }
-
-    public function loadViewEngines()
-    {
-        $views = View::$engines;
-
-        if (count($views) > 0) {
-            foreach ($views as $key => $value) {
-                $this->container->singleton($key, function () use ($value) {
-                    return $value;
-                });
-            }
-        }
+        Config::singleton($name, $value);
     }
 
     private function setupDefaultContainer()
     {
-        // Default request
-        $this->container->singleton('request', function () {
-            return new \Leaf\Http\Request();
+        Config::singleton('request', function () {
+            return new Http\Request();
         });
 
-        // Default response
-        $this->container->singleton('response', function () {
-            return new \Leaf\Http\Response();
+        Config::singleton('response', function () {
+            return new Http\Response();
         });
 
-        // Default headers
-        $this->container->singleton('headers', function () {
-            return new \Leaf\Http\Headers();
+        Config::singleton('headers', function () {
+            return new Http\Headers();
         });
 
-        if ($this->config('log.enabled')) {
-            if (class_exists('Leaf\Log')) {
-                // Default log writer
-                $this->container->singleton('logWriter', function ($c) {
-                    $logWriter = Config::get('log.writer');
+        Config::singleton('app', function () {
+            return $this;
+        });
 
-                    $file = $this->config('log.dir') . $this->config('log.file');
-
-                    return is_object($logWriter) ? $logWriter : new \Leaf\LogWriter($file, $this->config('log.open') ?? true);
-                });
-
-                // Default log
-                $this->container->singleton('log', function ($c) {
-                    $log = new \Leaf\Log($c['logWriter']);
-                    $log->enabled($this->config('log.enabled'));
-                    $log->level($this->config('log.level'));
-
-                    return $log;
-                });
-            }
-        }
-
-        // Default mode
-        (function () {
-            $mode = $this->config('mode');
-
-            if (_env('APP_ENV')) {
-                $mode = _env('APP_ENV');
-            }
-
-            if (_env('LEAF_MODE')) {
-                $mode = _env('LEAF_MODE');
-            }
-
-            if (isset($_ENV['LEAF_MODE'])) {
-                $mode = $_ENV['LEAF_MODE'];
-            } else {
-                $envMode = getenv('LEAF_MODE');
-
-                if ($envMode !== false) {
-                    $mode = $envMode;
-                }
-            }
-
-            $this->config('mode', $mode);
-        })();
-
-        Config::set('app', [
-            'instance' => $this,
-            'container' => $this->container,
-        ]);
+        Config::set('mode', _env('APP_ENV', Config::getStatic('mode')));
     }
 
     public function __get($name)
     {
-        return $this->container->get($name);
+        return Config::get($name);
     }
 
     public function __set($name, $value)
     {
-        $this->container->set($name, $value);
+        Config::set($name, $value);
     }
 
     public function __isset($name)
     {
-        return $this->container->has($name);
+        return Config::has($name);
     }
 
     public function __unset($name)
     {
-        $this->container->remove($name);
+        Config::remove($name);
+    }
+
+    public function __call($method, $args)
+    {
+        return Config::view($method);
     }
 
     /**
@@ -246,12 +158,86 @@ class App extends Router
      */
     public function config($name, $value = null)
     {
-        if ($value === null && is_string($name)) {
+        if ($value === null && \is_string($name)) {
             return Config::get($name);
         }
 
         Config::set($name, $value);
+        $this->loadConfig();
         $this->setupErrorHandler();
+    }
+
+    /**
+     * Run code that can change the behaviour of Leaf
+     * *Usually used by library creators*
+     */
+    public function attach(callable $code)
+    {
+        \call_user_func($code, $this, Config::get());
+        $this->loadConfig();
+        $this->setupErrorHandler();
+    }
+
+    /**
+     * Attach a view engine to Leaf
+     * @param mixed $view The view engine to attach
+     */
+    public function attachView($view)
+    {
+        Config::attachView($view);
+    }
+
+    /**
+     * Evade CORS errors
+     *
+     * @param $options Config for cors
+     */
+    public function cors($options = [])
+    {
+        if (\class_exists('Leaf\Http\Cors')) {
+            Http\Cors::config($options);
+        } else {
+            \trigger_error('Cors module not found! Run `leaf install cors` or `composer require leafs/cors` to install the CORS module. This is required to configure CORS.');
+        }
+    }
+
+    /**
+     * Add CSRF protection to your app
+     *
+     * @param array $options Config for csrf
+     */
+    public function csrf($options = [])
+    {
+        if (!\class_exists('Leaf\Anchor\CSRF')) {
+            \trigger_error('CSRF module not found! Run `leaf install csrf` or `composer require leafs/csrf` to install the CSRF module. This is required to configure CSRF.');
+        }
+
+        Config::set('session', true);
+
+        if (!Anchor\CSRF::token()) {
+            Anchor\CSRF::config($options);
+            Anchor\CSRF::init();
+        }
+
+        $this->use(function () {
+            Anchor\CSRF::validate();
+        });
+    }
+
+    /**
+     * Create a route handled by websocket (requires Eien module)
+     *
+     * @param string $name The url of the route
+     * @param callable $callback The callback function
+     * @uses package Eien module
+     * @see https://leafphp.dev/modules/eien/
+     */
+    public function ws(string $name, callable $callback)
+    {
+        Config::set('eien.events', \array_merge(
+            Config::getStatic('eien.events') ?? [],
+            [$name => $callback]
+        ));
     }
 
     /********************************************************************************
@@ -266,7 +252,7 @@ class App extends Router
     public function logger()
     {
         if (!$this->log) {
-            trigger_error('You need to enable logging to use this feature! Set log.enabled to true and install the logger module');
+            \trigger_error('You need to enable logging to use this feature! Set log.enabled to true and install the logger module');
         }
 
         return $this->log;
@@ -278,47 +264,26 @@ class App extends Router
 
     /**
      * Get the Request Headers
-     * @return \Leaf\Http\Headers
      */
-    public function headers()
+    public function headers(): Http\Headers
     {
         return $this->headers;
     }
 
     /**
      * Get the Request object
-     * @return \Leaf\Http\Request
      */
-    public function request()
+    public function request(): Http\Request
     {
         return $this->request;
     }
 
     /**
      * Get the Response object
-     * @return \Leaf\Http\Response
      */
-    public function response()
+    public function response(): Http\Response
     {
         return $this->response;
-    }
-
-
-    /**
-     * Create mode-specific code
-     *
-     * @param string $mode The mode to run code in
-     * @param callable $callback The code to run in selected mode.
-     */
-    public static function script($mode, $callback)
-    {
-        static::hook('router.before', function () use ($mode, $callback) {
-            $appMode = Config::get('mode') ?? 'development';
-
-            if ($mode === $appMode) {
-                return $callback();
-            }
-        });
     }
 
     /********************************************************************************
@@ -337,17 +302,7 @@ class App extends Router
      */
     public function root()
     {
-        return rtrim($_SERVER['DOCUMENT_ROOT'], '/') . rtrim($this->request->getRootUri(), '/') . '/';
-    }
-
-    /**
-     * Clean current output buffer
-     */
-    protected function cleanBuffer()
-    {
-        if (ob_get_level() !== 0) {
-            ob_clean();
-        }
+        return \rtrim($_SERVER['DOCUMENT_ROOT'], '/') . \rtrim($this->request->getScriptName(), '/') . '/';
     }
 
     /**
@@ -362,29 +317,63 @@ class App extends Router
      */
     public static function halt($status, $message = '')
     {
-        if (ob_get_level() !== 0) {
-            ob_clean();
+        if (\ob_get_level() !== 0) {
+            \ob_clean();
         }
 
-        Http\Headers::status($status);
-        Http\Response::markup($message);
+        Http\Headers::resetStatus($status);
+        response()->exit($message, $status);
+    }
 
-        exit();
+    /********************************************************************************
+     * Env, router and server
+     *******************************************************************************/
+
+    /**
+     * Create mode-specific code
+     *
+     * @param string $mode The mode to run code in
+     * @param callable $callback The code to run in selected mode.
+     */
+    public static function script($mode, $callback)
+    {
+        static::hook('router.before', function () use ($mode, $callback) {
+            $appMode = Config::getStatic('mode') ?? 'development';
+
+            if ($mode === $appMode) {
+                return $callback();
+            }
+        });
     }
 
     /**
-     * Evade CORS errors
+     * Run mode-specific code. Unlike script, this runs immedietly.
      *
-     * Cors handler
-     *
-     * @param $options Config for cors
+     * @param string $mode The mode to run code in
+     * @param callable $callback The code to run in selected mode.
      */
-    public function cors($options = [])
+    public static function environment($mode, $callback)
     {
-        if (class_exists('Leaf\Http\Cors')) {
-            Http\Cors::config($options);
+        $appMode = Config::getStatic('mode') ?? 'development';
+
+        if ($mode === $appMode) {
+            return $callback();
+        }
+    }
+
+    /**
+     * @inheritdoc
+     */
+    public static function run(?callable $callback = null)
+    {
+        if (\class_exists('Leaf\Eien\Server') && Config::getStatic('eien.enabled')) {
+            server()
+                ->wrap(function () use ($callback) {
+                    parent::run($callback);
+                })
+                ->listen();
         } else {
-            trigger_error('Cors module not found! Run `composer require leafs/cors` to install the CORS module. This is required to configure CORS.');
+            return parent::run($callback);
         }
     }
 }
